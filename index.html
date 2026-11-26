@@ -204,6 +204,9 @@ button,select{font-family:var(--font)}
     <div class="row"><span>Separar manos</span><div class="pseg" data-k="split"><button data-v="auto">Auto</button><button data-v="c4">Do central</button></div></div>
     <div class="row"><span>Intercambiar manos</span><button class="tg" data-k="swap"></button></div>
     <div class="row"><span>Mis notas suenan <em>(libre)</em></span><button class="tg" data-k="guide"></button></div>
+    <div class="row"><span>Sustain</span><div class="pseg" data-k="sustain"><button data-v="off">No</button><button data-v="auto">Auto</button><button data-v="man">Manual</button></div></div>
+    <div class="row" id="susRow"><span>Sustain manual</span><div class="stp" data-k="susSec" data-min="0.5" data-max="5" data-step="0.5" data-suf=" s"></div></div>
+    <p class="hint"><b>Auto:</b> cada nota que suena desde la app se sostiene hasta que esa mano toca lo siguiente (máx. 1.5 s), así no se encima el sonido. <b>Manual:</b> se sostiene los segundos que elijas.</p>
 
     <div class="sec">ESPERA Y MAESTRO</div>
     <div class="row"><span>Acordes</span><div class="pseg" data-k="chord"><button data-v="acum">Armando</button><button data-v="simul">Juntas</button></div></div>
@@ -214,7 +217,8 @@ button,select{font-family:var(--font)}
     <div class="row"><span>Repeticiones limpias</span><div class="stp" data-k="cleanReps" data-min="1" data-max="9" data-step="1"></div></div>
     <div class="row"><span>Tiempo de reacción</span><div class="stp" data-k="react" data-min="4" data-max="20" data-step="1" data-suf=" s"></div></div>
     <div class="row"><span>Oportunidades por acorde</span><div class="stp" data-k="hitsNeed" data-min="0" data-max="5" data-step="1"></div></div>
-    <p class="hint">Cuando la línea llega al piano corre el tiempo de reacción (barra sobre las teclas). Si tocas una tecla equivocada se usa una oportunidad y la canción te sigue esperando en esa misma nota o acorde. Solo si se acaban las oportunidades o el tiempo, la sección vuelve a empezar. Pasas a la siguiente después de las repeticiones limpias.</p>
+    <div class="row"><span>Errores por sección</span><div class="stp" data-k="secErrs" data-min="0" data-max="20" data-step="1"></div></div>
+    <p class="hint">Cuando la línea llega al piano corre el tiempo de reacción (barra sobre las teclas). Si tocas una tecla equivocada se usa una oportunidad y la canción te sigue esperando en esa misma nota o acorde. La sección vuelve a empezar si se acaban las oportunidades de un acorde, si se acaba el tiempo, o si en toda la sección sumas más errores de los permitidos; así solo avanzas cuando la tocas con pocos errores, no por irle atinando. Pasas a la siguiente después de las repeticiones limpias.</p>
 
     <div class="sec">MIDI</div>
     <div class="row"><span>Entrada (piano)</span><select id="selIn"></select></div>
@@ -259,7 +263,7 @@ const THEMES={
   rosa:['#84435f','#fae4ee','Rosa'],       arena:['#64553c','#f3ecdd','Arena']};
 const NOTE_COLORS=['#e07a5f','#4a7fc1','#4f9a78','#8e6cc0','#d4a017','#d9688f','#3aa6a6'];
 const DEF={theme:'clasico',invert:false,kbH:0.24,autoFit:true,keysVisible:52,keyOffset:12,bottomPad:0,window:3.5,
-  other:'play',split:'auto',swap:false,guide:false,chord:'acum',bars:2,cleanReps:2,react:10,hitsNeed:2,
+  other:'play',split:'auto',swap:false,guide:false,chord:'acum',bars:2,cleanReps:2,react:10,hitsNeed:2,secErrs:4,sustain:'auto',susSec:1.5,
   hands:'B',mode:'libre',rate:1,inId:'all',outId:'auto'};
 const LS='pianoTrainer.v1';
 let S={...DEF};
@@ -363,7 +367,7 @@ function parseMidi(buf){
 let song=null,pnotes=[],groups=[],events=[],sections=[];
 let now=0,playing=false,gi=0,ai=0,waitG=null,waitStart=0;
 let loopA=null,loopB=null;
-const mst={i:0,clean:0};
+const mst={i:0,clean:0,errs:0};
 const held=new Map();          // tecla -> {real,song,consumed}
 const sounding=new Set(),sentAt=new Map();
 let parts=[],pT=0,errT=-1e9,dirty=true;
@@ -405,9 +409,15 @@ function rebuild(){
   groups=[];let g=null;
   for(const n of pnotes){if(!g||n.s-g.t>0.045){g={t:n.s,pitches:new Set(),notes:[],hits:0,ready:false};groups.push(g)}g.pitches.add(n.p);g.notes.push(n)}
   events=[];
-  for(const n of song.notes){
-    const out=n.prac?(S.guide&&S.mode==='libre'):(S.other==='play');
-    if(out)events.push({t:n.s,on:1,p:n.p,v:n.v},{t:n.e,on:0,p:n.p});
+  const outN=song.notes.filter(n=>n.prac?(S.guide&&S.mode==='libre'):(S.other==='play'));
+  const starts={R:[],L:[]};for(const n of outN)starts[n.hand].push(n.s);
+  const nextSame={};
+  for(let i=outN.length-1;i>=0;i--){const n=outN[i];let off=n.e;
+    if(S.sustain==='auto'){const a=starts[n.hand],j=lb(a,t=>t>n.s+0.045);const nx=j<a.length?a[j]+0.05:n.e+1.5;off=Math.max(n.e,Math.min(nx,n.e+1.5))}
+    else if(S.sustain==='man')off=n.e+S.susSec;
+    const ns=nextSame[n.p];if(ns!=null)off=Math.min(off,Math.max(n.e,ns-0.01));
+    nextSame[n.p]=n.s;
+    events.push({t:n.s,on:1,p:n.p,v:n.v},{t:off,on:0,p:n.p});
   }
   events.sort((a,b)=>a.t-b.t||a.on-b.on);
   sections=computeSections();
@@ -421,7 +431,7 @@ function computeSections(){
   if(loopOn())return out.map(x=>({s:Math.max(x.s,loopA),e:Math.min(x.e,loopB)})).filter(x=>x.e-x.s>0.05);
   return out;
 }
-function maestroSync(){mst.i=lb(sections,x=>x.e>now+1e-6)}
+function maestroSync(){mst.i=lb(sections,x=>x.e>now+1e-6);mst.errs=0}
 
 /* ---------- salida MIDI ---------- */
 let midi=null,outPort=null,midiState='init';
@@ -447,7 +457,7 @@ function play(){if(!song)return;if(now>=song.dur)stop();playing=true;wake(true);
 function pause(){playing=false;allOff();wake(false);updPlay()}
 function toggle(){playing?pause():play()}
 function stop(){playing=false;allOff();wake(false);const st=loopOn()?loopA:0;seek(st-(st?lead():Math.min(2.2,S.window*.7)),st);mst.clean=0;maestroSync();updPlay()}
-function seekSection(i){const sec=sections[i];if(!sec)return;seek(sec.s-lead(),sec.s)}
+function seekSection(i){const sec=sections[i];mst.errs=0;if(!sec)return;seek(sec.s-lead(),sec.s)}
 
 function step(dt){
   let target=now+dt*S.rate,waiting=null;
@@ -473,11 +483,11 @@ function maestroCheck(){
   if(has){mst.clean++;
     if(mst.clean<S.cleanReps){toast('✓ '+mst.clean+' / '+S.cleanReps+' · otra vez');seekSection(mst.i);return}
     toast('✓ Sección lista')}
-  mst.clean=0;mst.i++;
+  mst.clean=0;mst.i++;mst.errs=0;
   if(mst.i>=sections.length&&loopOn()){mst.i=0;seekSection(0)}
 }
-function maestroError(){
-  errT=nowMs();mst.clean=0;toast('↺ Desde el inicio de la sección');seekSection(mst.i);
+function maestroError(msg){
+  errT=nowMs();mst.clean=0;toast(msg||'↺ Desde el inicio de la sección');seekSection(mst.i);
 }
 
 /* ---------- entrada de notas ---------- */
@@ -514,9 +524,10 @@ function noteOn(p,v,src){
     const i0=lb(pnotes,n=>n.s>=now-song.maxDur-0.5);
     for(let i=i0;i<pnotes.length;i++){const n=pnotes[i];if(n.s>now+0.05)break;if(n.p===p&&n.e+0.15>=now)return}
     if(!g)return;
-    g.errs=(g.errs||0)+1;
-    if(g.errs>S.hitsNeed)maestroError();
-    else toast('Fallo '+g.errs+' de '+S.hitsNeed+' · sigue intentando');
+    g.errs=(g.errs||0)+1;mst.errs++;
+    if(mst.errs>S.secErrs)maestroError('↺ Muchos errores en la sección · otra vez');
+    else if(g.errs>S.hitsNeed)maestroError();
+    else toast('Fallo '+g.errs+' de '+S.hitsNeed+' · sección '+mst.errs+' de '+S.secErrs);
   }
 }
 function noteOff(p){held.delete(p);spray.delete(p);dirty=true}
@@ -651,7 +662,7 @@ function updHud(){
     if(loopOn()){lp.style.left=pc(loopA);lp.style.width=(clamp((loopB-loopA)/d,0,1)*100)+'%'}
     $('#bA').classList.toggle('on',loopA!=null);$('#bB').classList.toggle('on',loopB!=null);$('#bX').hidden=loopA==null&&loopB==null}
   let t='';
-  if(S.mode==='maestro'&&sections.length)t='SECCIÓN '+Math.min(mst.i+1,sections.length)+' / '+sections.length+'  ·  LIMPIAS '+mst.clean+' / '+S.cleanReps;
+  if(S.mode==='maestro'&&sections.length)t='SECCIÓN '+Math.min(mst.i+1,sections.length)+' / '+sections.length+'  ·  LIMPIAS '+mst.clean+' / '+S.cleanReps+'  ·  ERRORES '+mst.errs+' / '+S.secErrs;
   if(loopOn())t=(t?t+'  ·  ':'')+'LOOP';
   if(t!==lastChip){lastChip=t;$('#chip').textContent=t}
 }
@@ -663,6 +674,7 @@ function syncUI(){
     else if(el.classList.contains('stp')){const b=el.querySelector('b');if(b)b.textContent=v+(el.dataset.suf||'')}
   });
   $('#sVal').textContent=Math.round(S.rate*100)+'%';
+  $('#susRow').style.opacity=S.sustain==='man'?1:.35;$('#susRow').style.pointerEvents=S.sustain==='man'?'':'none';
   $('#otherIco').innerHTML='<path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z" fill="currentColor" stroke="none"/>'+(S.other==='play'?'<path d="M15.5 9a4 4 0 0 1 0 6M18 6.5a7.5 7.5 0 0 1 0 11"/>':'<path d="M16 9.5l5 5M21 9.5l-5 5"/>');$('#bOther').style.opacity=S.other==='play'?1:.6;
   $$('.man').forEach(r=>{r.style.opacity=S.autoFit?.35:1;r.style.pointerEvents=S.autoFit?'none':''});
   const off=$('[data-k=keyOffset]');off.min=0;off.max=W_HI-W_LO+1-S.keysVisible;S.keyOffset=clamp(S.keyOffset,0,+off.max);off.value=S.keyOffset;
@@ -675,7 +687,7 @@ function onSet(k){
   if(k==='theme'||k==='invert')applyTheme();
   if(['kbH','autoFit','keysVisible','keyOffset','bottomPad','window'].includes(k)){computeView();layout()}
   if(k==='split'||k==='swap')assignHands();
-  if(['other','split','swap','guide','hands','mode'].includes(k)&&song){refresh();if(k==='mode'||k==='hands'){mst.clean=0}}
+  if(['other','split','swap','guide','hands','mode','sustain','susSec'].includes(k)&&song){refresh();if(k==='mode'||k==='hands'){mst.clean=0}}
   if(k==='bars'&&song){sections=computeSections();maestroSync();mst.clean=0}
   if(k==='mode')toast({libre:'Modo libre: la canción no se detiene',espera:'Modo espera: avanza cuando tocas cada línea',maestro:'Modo maestro: repite la sección si fallas'}[S.mode]);
   syncUI();dirty=true;
